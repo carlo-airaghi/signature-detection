@@ -20,8 +20,13 @@ Dato un documento (PDF o immagine), trova i campi firma e dice se sono firmati
 4. **Matching** — un campo è firmato se una firma vera ricade per almeno il 25%
    della sua area nella zona del campo. Firme fuori dai campi → `orphan_signatures`.
 
-Per le immagini (scansioni senza text layer) vengono riportate solo le firme
-trovate: per i campi servirebbe un OCR (es. Tesseract), estensione semplice.
+**Scansioni e foto** (immagini o PDF senza text layer): il testo arriva
+dall'OCR — Apple Vision su macOS (ottimo anche su foto, italiano incluso),
+RapidOCR (ONNX) come fallback cross-platform — e le righe di firma vengono
+rilevate direttamente dai pixel (linee orizzontali continue di larghezza
+tipica). Il matching delle keyword è fuzzy (Levenshtein ≤2) per tollerare gli
+errori OCR, tipici quando la firma copre l'etichetta; un campo con etichetta
+incerta e senza riga vale solo se risulta firmato.
 
 ## Setup
 
