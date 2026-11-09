@@ -52,7 +52,8 @@
   .badge { font-weight: 700; padding: 3px 12px; border-radius: 999px; font-size: .9rem; }
   .badge.si { color: var(--ok); background: var(--ok-bg); }
   .badge.no { color: var(--no); background: var(--no-bg); }
-  .field-row { font-size: .95rem; color: var(--muted); padding-left: 14px; }
+  .answer.field { margin-left: 18px; }
+  .conf { color: var(--muted); font-size: .85rem; font-weight: 400; }
   .warn-row { color: var(--warn); background: var(--warn-bg); padding: 8px 14px;
     border-radius: 10px; font-size: .9rem; }
   details { margin-top: 12px; }
@@ -126,14 +127,13 @@ function render(data) {
   const out = [];
   for (const p of data.pages) {
     const rows = [];
-    rows.push(`<div class="answer">Campo di firma trovato a pag. ${p.page} ${badge(p.field_found)}</div>`);
-    if (p.field_found) {
-      rows.push(`<div class="answer">Campo di firma firmato all'interno ${badge(p.all_fields_signed)}</div>`);
-      for (const f of p.fields) {
-        const conf = f.signature_confidence != null ? ` (confidenza ${f.signature_confidence.toFixed(2)})` : '';
-        rows.push(`<div class="field-row">· ${esc(f.label)} — ${f.signed ? 'firmato' + conf : 'non firmato'}</div>`);
-      }
-    }
+    rows.push(`<div class="answer">Campi di firma trovati a pag. ${p.page}: <b>${p.fields.length}</b> ${badge(p.field_found)}</div>`);
+    p.fields.forEach((f, i) => {
+      const n = i + 1;
+      const conf = f.signature_confidence != null ? ` <span class="conf">(confidenza ${f.signature_confidence.toFixed(2)})</span>` : '';
+      rows.push(`<div class="answer field">Campo Firma ${n}: <b>${esc(f.name)}</b></div>`);
+      rows.push(`<div class="answer field">Campo Firma ${n} firmato ${badge(f.signed)}${conf}</div>`);
+    });
     if (p.rejected_marks.length)
       rows.push(`<div class="warn-row">⚠ ${p.rejected_marks.length} segno/i tipo X o riga ignorati: non sono firme vere</div>`);
     if (p.orphan_signatures.length)

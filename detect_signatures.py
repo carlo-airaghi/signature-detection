@@ -67,6 +67,7 @@ class Detection:
 class SignatureField:
     """Un campo firma individuato nel documento (coordinate pixel)."""
     label: str
+    name: str  # nome del campo, es. "CLIENTE" da "Firma del Cliente"
     box: tuple[float, float, float, float]
     source: str  # "acroform" | "keyword"
     signed: bool = False
@@ -204,6 +205,19 @@ def simple_mark_score(image: Image.Image, box: tuple[float, float, float, float]
 
 # ---------------------------------------------------------------- campi firma
 
+_NAME_STOPWORDS = {"del", "dello", "della", "dei", "delle", "degli", "di", "da",
+                   "il", "lo", "la", "the", "of", "by", "e", "and"}
+
+
+def field_name_from_label(label: str) -> str:
+    """"Firma del Cliente" -> "CLIENTE"; se non resta nulla, l'etichetta intera."""
+    words = [w.strip(":.,;()[]_") for w in label.split()]
+    kept = [w for w in words
+            if w and not any(w.lower().startswith(k) for k in FIELD_KEYWORDS)
+            and w.lower() not in _NAME_STOPWORDS]
+    return " ".join(kept).upper() or label.strip(":.,;()[]_ ").upper()
+
+
 def find_fields_pdf_page(page: "fitz.Page", scale: float) -> list[SignatureField]:
     """Campi firma da widget AcroForm + parole chiave nel text layer (coordinate pixel)."""
     fields: list[SignatureField] = []
@@ -214,6 +228,7 @@ def find_fields_pdf_page(page: "fitz.Page", scale: float) -> list[SignatureField
             r = w.rect * scale
             fields.append(SignatureField(
                 label=w.field_name or "signature_widget",
+                name=(w.field_name or "CAMPO FIRMA").upper(),
                 box=(r.x0, r.y0, r.x1, r.y1), source="acroform"))
 
     # 2) parole chiave nel testo
@@ -239,8 +254,9 @@ def find_fields_pdf_page(page: "fitz.Page", scale: float) -> list[SignatureField
             min(page_rect.x1, x1 + ZONE_RIGHT_PAD),
             min(page_rect.y1, y1 + ZONE_BOTTOM_PAD),
         ) * scale
+        label = " ".join(label_words)[:60]
         fields.append(SignatureField(
-            label=" ".join(label_words)[:60],
+            label=label, name=field_name_from_label(label),
             box=(zone.x0, zone.y0, zone.x1, zone.y1), source="keyword"))
 
     # dedup: zone keyword quasi sovrapposte
