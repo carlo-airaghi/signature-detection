@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+output/
+report*.json
+test_*.pdf
+.DS_Store
+.claude/
