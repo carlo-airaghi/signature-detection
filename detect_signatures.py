@@ -39,15 +39,22 @@ RENDER_DPI = 200  # risoluzione di render per i PDF
 
 # parole chiave che identificano un'etichetta di campo firma (minuscole)
 FIELD_KEYWORDS = (
-    "firma", "firmato", "firmatario",
+    "firma", "firme", "firmato", "firmatario",
     "signature", "signed", "signatory", "unterschrift",
 )
 
-# zona candidata attorno all'etichetta, in punti PDF (1 pt = 1/72")
+# zona candidata attorno all'etichetta, in punti PDF (1 pt = 1/72"):
+# usata solo come fallback quando non c'e' una riga di firma vicina
 ZONE_LEFT_PAD = 10
 ZONE_RIGHT_PAD = 260
 ZONE_TOP_PAD = 80
 ZONE_BOTTOM_PAD = 25
+
+# righe di firma: linee orizzontali di larghezza tipica di una firma
+SIG_LINE_MIN_W = 70
+SIG_LINE_MAX_W = 340
+SIG_ZONE_ABOVE = 85   # quanto spazio sopra la riga appartiene alla firma
+LABEL_LINE_MAX_DIST = 120  # distanza max etichetta <-> riga di firma
 
 
 # ---------------------------------------------------------------- dataclass
@@ -209,6 +216,22 @@ _NAME_STOPWORDS = {"del", "dello", "della", "dei", "delle", "degli", "di", "da",
                    "il", "lo", "la", "the", "of", "by", "e", "and"}
 
 
+def _signature_lines(page: "fitz.Page") -> list[tuple[float, float, float]]:
+    """Linee orizzontali con larghezza tipica di una riga di firma: (x0, y, x1)."""
+    out: list[tuple[float, float, float]] = []
+    for d in page.get_drawings():
+        for item in d["items"]:
+            if item[0] == "l":
+                p1, p2 = item[1], item[2]
+                if abs(p1.y - p2.y) < 2:
+                    out.append((min(p1.x, p2.x), (p1.y + p2.y) / 2, max(p1.x, p2.x)))
+            elif item[0] == "re":
+                r = item[1]
+                if r.height < 3:
+                    out.append((r.x0, (r.y0 + r.y1) / 2, r.x1))
+    return [l for l in out if SIG_LINE_MIN_W <= l[2] - l[0] <= SIG_LINE_MAX_W]
+
+
 def field_name_from_label(label: str) -> str:
     """"Firma del Cliente" -> "CLIENTE"; se non resta nulla, l'etichetta intera."""
     words = [w.strip(":.,;()[]_") for w in label.split()]
@@ -231,33 +254,95 @@ def find_fields_pdf_page(page: "fitz.Page", scale: float) -> list[SignatureField
                 name=(w.field_name or "CAMPO FIRMA").upper(),
                 box=(r.x0, r.y0, r.x1, r.y1), source="acroform"))
 
-    # 2) parole chiave nel testo
     words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
     page_rect = page.rect
+    sig_lines = _signature_lines(page)
+    line_used = [False] * len(sig_lines)
+
+    def clamp(r: "fitz.Rect") -> "fitz.Rect":
+        return fitz.Rect(max(page_rect.x0, r.x0), max(page_rect.y0, r.y0),
+                         min(page_rect.x1, r.x1), min(page_rect.y1, r.y1))
+
+    def zone_from_line(label_rect: "fitz.Rect", sl) -> "fitz.Rect":
+        lx0, ly, lx1 = sl
+        x0, x1 = min(lx0, label_rect.x0) - 5, max(lx1, label_rect.x1) + 5
+        if ly >= label_rect.y1 - 2:  # riga sotto l'etichetta: firma tra le due
+            y0, y1 = label_rect.y0 - 5, ly + 10
+        else:                        # riga sopra l'etichetta: firma sopra la riga
+            y0, y1 = ly - SIG_ZONE_ABOVE, label_rect.y1 + 5
+        return clamp(fitz.Rect(x0, y0, x1, y1))
+
+    def nearest_free_line(label_rect: "fitz.Rect"):
+        best, best_d = None, LABEL_LINE_MAX_DIST + 1
+        for i, (lx0, ly, lx1) in enumerate(sig_lines):
+            if line_used[i]:
+                continue
+            overlap = min(lx1, label_rect.x1) - max(lx0, label_rect.x0)
+            if overlap < min(40.0, (lx1 - lx0) * 0.3):
+                continue
+            d = abs(ly - (label_rect.y0 + label_rect.y1) / 2)
+            if d < best_d:
+                best, best_d = i, d
+        return best
+
+    def text_line_info(block: int, line: int):
+        lws = sorted((lw for lw in words if lw[5] == block and lw[6] == line),
+                     key=lambda t: t[0])
+        rect = fitz.Rect(min(t[0] for t in lws), min(t[1] for t in lws),
+                         max(t[2] for t in lws), max(t[3] for t in lws))
+        return lws, rect, " ".join(t[4] for t in lws)[:60]
+
+    # 2) parole chiave nel testo
+    seen_text_lines = set()
     for x0, y0, x1, y1, word, block, line, _wno in words:
         w = word.lower().strip(":.,;()[]")
         if not any(w.startswith(k) for k in FIELD_KEYWORDS):
             continue
+        if (block, line) in seen_text_lines:
+            continue
+        seen_text_lines.add((block, line))
         # scarta le keyword dentro un paragrafo: un'etichetta di campo sta su
         # una riga corta (es. "Firma del Cliente"), non in un testo scorrevole
-        line_words = [lw for lw in words if lw[5] == block and lw[6] == line]
-        if len(line_words) > 5:
+        lws, label_rect, label = text_line_info(block, line)
+        if len(lws) > 5:
             continue
-        # etichetta completa = parole sulla stessa riga vicine alla keyword
-        label_words = [word]
-        for wx0, wy0, wx1, wy1, other, *_ in words:
-            if other != word and abs(wy0 - y0) < 3 and 0 < wx0 - x1 < 150:
-                label_words.append(other)
-        zone = fitz.Rect(
-            max(page_rect.x0, x0 - ZONE_LEFT_PAD),
-            max(page_rect.y0, y0 - ZONE_TOP_PAD),
-            min(page_rect.x1, x1 + ZONE_RIGHT_PAD),
-            min(page_rect.y1, y1 + ZONE_BOTTOM_PAD),
-        ) * scale
-        label = " ".join(label_words)[:60]
+        li = nearest_free_line(label_rect)
+        if li is not None:
+            line_used[li] = True
+            zone = zone_from_line(label_rect, sig_lines[li])
+        else:
+            zone = clamp(fitz.Rect(x0 - ZONE_LEFT_PAD, y0 - ZONE_TOP_PAD,
+                                   x1 + ZONE_RIGHT_PAD, y1 + ZONE_BOTTOM_PAD))
+        zone *= scale
         fields.append(SignatureField(
             label=label, name=field_name_from_label(label),
             box=(zone.x0, zone.y0, zone.x1, zone.y1), source="keyword"))
+
+    # 3) righe di firma senza keyword: etichettate dal testo corto che le sovrasta
+    #    (es. "L'Agente Procuratore" sopra la riga)
+    for i, (lx0, ly, lx1) in enumerate(sig_lines):
+        if line_used[i]:
+            continue
+        best_key, best_d = None, 91.0
+        for x0, y0, x1, y1, word, block, line, _wno in words:
+            if not (ly - 90 <= y1 <= ly - 2):
+                continue
+            if min(lx1, x1) - max(lx0, x0) <= 0:
+                continue
+            d = ly - y1
+            if d < best_d:
+                best_key, best_d = (block, line), d
+        if best_key is None:
+            continue
+        lws, label_rect, label = text_line_info(*best_key)
+        if len(lws) > 4:  # sopra c'e' un paragrafo, non un'etichetta
+            continue
+        zone = zone_from_line(label_rect, sig_lines[i]) * scale
+        fields.append(SignatureField(
+            label=label, name=field_name_from_label(label),
+            box=(zone.x0, zone.y0, zone.x1, zone.y1), source="line"))
+
+    fields.sort(key=lambda f: (f.box[1], f.box[0]))
 
     # dedup: zone keyword quasi sovrapposte
     deduped: list[SignatureField] = []
